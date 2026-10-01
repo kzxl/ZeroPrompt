@@ -18,7 +18,7 @@
   <ItemGroup>
     <PackageReference Include="ZeroPrimitives.Core" Version="1.7.0" />
     <PackageReference Include="ZeroConcurrency" Version="1.4.0" />
-    <PackageReference Include="ZeroVector.Core" Version="1.0.0" />
+    <PackageReference Include="ZeroVector.Core" Version="1.1.0" />
     <PackageReference Include="ZeroTokenizer.Core" Version="1.0.0" />
   </ItemGroup>
 

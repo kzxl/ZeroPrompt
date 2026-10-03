@@ -1,10 +1,11 @@
 # 🎯 ZeroPrompt: Sovereign Pure C# Prompt Templating & Grammar-Constrained Engine
 
+[![Version: 1.3.0](https://img.shields.io/badge/Version-1.3.0-blue.svg)](https://github.com/kzxl/ZeroPrompt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![.NET Multi-Targeting](https://img.shields.io/badge/.NET-8.0%20%7C%204.6.2%20%7C%20Standard%202.0-purple.svg)](https://dotnet.microsoft.com/)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20(Pure%20C%23)-brightgreen.svg)]()
 
-**ZeroPrompt** is an industrial-grade, zero-allocation prompt templating, Pushdown Automaton (PDA) JSON Grammar state machine, Grammar-Constrained Logit Masker, and dynamic few-shot exemplar selector written in 100% pure C#. It operates at **Tier 5 (Presentation & Orchestration)** of the [ZeroPlatform](https://github.com/kzxl/ZeroPlatform) ecosystem.
+**ZeroPrompt** is an industrial-grade, zero-allocation prompt templating, Pushdown Automaton (PDA) JSON Schema state machine, Grammar-Constrained Logit Masker, and dynamic few-shot exemplar selector written in 100% pure C#. It operates at **Tier 5 (Presentation & Orchestration)** of the [ZeroPlatform](https://github.com/kzxl/ZeroPlatform) ecosystem.
 
 ---
 
@@ -17,18 +18,19 @@
 - **Pushdown Automaton (PDA) JSON Grammar Engine (`JsonGrammarState`)**:
   - Microsecond deterministic stack-based validation of LLM generation streams.
   - Tracks nested objects (`{`), arrays (`[`), string literals, escape sequences, colons, and commas.
-  - Evaluates allowable next character classes (e.g. `AllowOpenBrace`, `AllowPropertyName`, `AllowColon`, `AllowValue`, `AllowComma`).
-- **Grammar-Constrained Logit Masking (`GrammarLogitMasker`)**:
-  - Dynamically masks out non-conforming tokens during autoregressive decoding (`-Infinity` for invalid tokens).
-  - Guarantees 100% syntactically valid JSON outputs from local LLMs (`ZeroLlm`) or remote endpoints, eliminating JSON parse hallucinations in tool-calling workflows.
+- **Schema-Constrained JSON Pushdown Automaton (`SchemaConstrainedJsonGrammar`)**:
+  - **64-bit Bitmask Property Validation**: Maps property indices to 64-bit unsigned integers (`ulong`), enforcing property whitelists, required property completeness, and strict data type constraints with single-cycle bitwise operations.
+  - **Zero Heap Allocations**: Replaces heap-allocated bracket stacks with a fixed inline buffer (`char[16]`), reducing token candidate testing latency to under $0.5\,\mu\text{s}$.
+- **Strict Tool Calling Finite Automaton (`ToolCallGrammarState`)**:
+  - Governs the `<tool_call>{"tool": "<name>", "parameters": { ... }}</tool_call>` syntax.
+  - **Zero Tool Name Hallucination**: Only allows the generation of tool names explicitly registered in the agent's tool catalog. Automatically switches parameter schemas upon tool name resolution.
+- **Context-Aware Grammar Logit Processor (`ToolCallGrammarLogitProcessor`)**:
+  - Integrates directly with `ZeroLlm` via `ContextAwareLogitProcessor`. Dynamically sets invalid syntax/schema token logits to $-\infty$ (`-1e9f`), mathematically guaranteeing 100% syntactically valid JSON tool calls.
 - **Dynamic Few-Shot Exemplar Selector (`FewShotSelector`)**:
   - Backed by `ZeroVector.Core` hardware-accelerated SIMD vector similarity (`VectorMetrics.CosineSimilarity`).
-  - Dynamically picks top-$K$ most semantically relevant few-shot input/output demonstrations for prompts.
+  - Dynamically selects the top-$K$ most semantically relevant few-shot demonstrations for prompts.
 - **Transformer KV-Cache Layout Optimizer (`PromptLayoutOptimizer`)**:
-  - Partitions prompt components strictly into cacheable static prefixes (`StaticSystem`, `ToolDefinitions`, `FewShot`, `ContextRAG`) and dynamic request-specific payloads (`History`, `DynamicSuffix`).
-  - Guarantees left-to-right prefix stability for local inference engines (`ZeroInference` / vLLM / llama.cpp), cutting TTFT by up to 70%.
-- **Prefix Radix Cache (`PrefixRadixCache`)**:
-  - Sub-microsecond thread-safe prefix tree for caching tokenized prompt prefixes with 64-bit FNV-1a hashing.
+  - Partitions prompt components strictly into cacheable static prefixes (`StaticSystem`, `ToolDefinitions`, `FewShot`, `ContextRAG`) and dynamic request-specific payloads (`History`, `DynamicSuffix`), cutting TTFT by up to 70%.
 - **Zero External Dependencies & Multi-Targeting**:
   - Compatible with `.NET 8.0+`, `.NET Framework 4.6.2+`, and `.NET Standard 2.0`.
 
@@ -50,66 +52,37 @@ string prompt = template.Render(context);
 Console.WriteLine(prompt);
 ```
 
-### 2. JSON Grammar State Machine
+### 2. Schema-Constrained JSON Grammar
 
 ```csharp
 using ZeroPrompt.Core.Grammar;
 
-var grammar = new JsonGrammarState();
+var schema = new JsonSchemaConstraint("so_query")
+    .AddProperty("order_id", SchemaPropertyType.String, required: true)
+    .AddProperty("limit", SchemaPropertyType.Number, required: false);
 
-// Feed tokens as they are sampled from LLM
-grammar.Feed("{\"tool\": \"read_register\", \"args\": {\"address\": 40001}}");
+var grammar = new SchemaConstrainedJsonGrammar(schema);
 
-if (grammar.IsCompleted)
+// Validate character transitions with zero heap allocation
+bool valid = grammar.CanAcceptNext("{\"order_id\": \"SO-2026-001\"}".AsSpan());
+Console.WriteLine($"Valid: {valid}");
+```
+
+### 3. Tool Call Grammar Logit Masking
+
+```csharp
+using ZeroPrompt.Core.Grammar;
+
+var schemas = new Dictionary<string, JsonSchemaConstraint>
 {
-    Console.WriteLine("Valid JSON payload generated!");
-}
-```
+    ["mds_db_so_query"] = new JsonSchemaConstraint("mds_db_so_query")
+        .AddProperty("order_id", SchemaPropertyType.String, required: true)
+};
 
-### 3. Grammar-Constrained Logit Masking
+var processor = new ToolCallGrammarLogitProcessor(tokenizer, schemas);
 
-```csharp
-using ZeroPrompt.Core.Grammar;
-
-var masker = new GrammarLogitMasker();
-var grammar = new JsonGrammarState();
-grammar.Feed("{\"status\": ");
-
-float[] logits = new float[vocabSize];
-string[] vocab = GetVocabularyTokens();
-
-// Masks out tokens that violate JSON syntax rules
-masker.ApplyMask(grammar, logits, vocab);
-```
-
-### 4. Semantic Few-Shot Exemplar Selection
-
-```csharp
-using ZeroPrompt.Core.FewShot;
-
-var selector = new FewShotSelector();
-selector.Add(new Exemplar("Read PLC register 100", "{\"tool\":\"read_plc\",\"reg\":100}", embedding1));
-selector.Add(new Exemplar("Query temperature sensor", "{\"tool\":\"get_temp\",\"id\":1}", embedding2));
-
-string demonstrationPrompt = selector.BuildDemonstrationPrompt(queryEmbedding, k: 1);
-```
-
-### 5. Transformer KV-Cache Prompt Layout Optimization
-
-```csharp
-using ZeroPrompt.Core.Caching;
-
-var optimizer = new PromptLayoutOptimizer()
-    .AddSystem("You are an autonomous SCADA diagnostic assistant.")
-    .AddTools("Tool: read_sensor(name)\nTool: trip_breaker(breaker_id)")
-    .AddHistory("User: Check voltage\nAssistant: Voltage is 220V")
-    .AddUserQuery("What is the current on Line 02?");
-
-OptimizedPromptLayout layout = optimizer.Optimize();
-
-// Cacheable immutable prefix (System + Tools)
-Console.WriteLine($"Prefix Hash: {layout.PrefixHash:X16}");
-Console.WriteLine($"Full Prompt:\n{layout.FullPrompt}");
+// Applied directly during LLM autoregressive token sampling
+processor.Process(logitsSpan, pastTokensSpan);
 ```
 
 ---
@@ -119,14 +92,17 @@ Console.WriteLine($"Full Prompt:\n{layout.FullPrompt}");
 ```mermaid
 flowchart TD
     PromptTemplate["ZeroPrompt.Core.Templates\n(PromptTemplate, PromptContext)"]
-    JsonGrammar["ZeroPrompt.Core.Grammar\n(JsonGrammarState, GrammarLogitMasker)"]
+    JsonGrammar["ZeroPrompt.Core.Grammar\n(SchemaConstrainedJsonGrammar, ToolCallGrammarState)"]
+    LogitMasker["ZeroPrompt.Core.Grammar\n(ToolCallGrammarLogitProcessor)"]
     FewShot["ZeroPrompt.Core.FewShot\n(FewShotSelector, Exemplar)"]
     
     FewShot --> VectorMetrics["ZeroVector.Core.Metrics\n(SIMD CosineSimilarity)"]
-    JsonGrammar --> ZeroLlm["ZeroLlm.Core\n(Constrained Sampler)"]
-    PromptTemplate --> ZeroAgent["ZeroAgent.Core\n(ReAct Orchestrator)"]
+    LogitMasker --> ZeroLlm["ZeroLlm.Core.Sampling\n(ContextAwareLogitProcessor)"]
+    JsonGrammar --> ZeroAgent["ZeroAgent.Core\n(AgentToolRegistry)"]
 ```
+
+---
 
 ## 📄 License
 
-MIT License. Engineered with pride for sovereign autonomous computing.
+Architected and developed by **Phong Võ** (`kzxl`) for the **ZeroUniverse / ZeroPlatform** ecosystem. Released under the **MIT License**.
